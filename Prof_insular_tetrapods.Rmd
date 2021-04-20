@@ -1,0 +1,347 @@
+---
+title: "Profiling insular tetrapods vulnerable to biological invasions"
+author: "Clara Marino"
+date: "20/04/2021"
+output: html_document
+---
+
+
+#### --------------------------------------------------------------
+## Step 0: setup ##
+#### --------------------------------------------------------------
+
+Clean workspace & set up required packages
+
+```{r}
+# clean workspace
+rm(list=ls())
+
+# packages
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, tibble, tidyr, rlist,
+               ape, clue, cluster, geometry, gtools, 
+               ggplot2, ggthemes)
+# dplyr, tidyr, tibble, miceadds, rlist: used for data manipulation 
+# ape, clue, cluster, geometry, gtools: for FD metrics computation
+# ggplot2, ggthemes: data visualization 
+
+```
+
+#### --------------------------------------------------------------
+## Step 1: load data & functions ##
+#### --------------------------------------------------------------
+
+Load data
+
+```{r}
+# load trait data for each taxa
+data_ft_amph <- readRDS("Data/1_data_ft_amph")
+data_ft_birds <- readRDS("Data/2_data_ft_birds")
+data_ft_mam <- readRDS("Data/3_data_ft_mam")
+data_ft_rept <- readRDS("Data/4_data_ft_rept")
+
+# load species groups (IAS/Other-threat, Threatened/Non-threatened)
+df_insul <- readRDS("Data/5_df_insular_assembl")
+
+```
+
+Source functions for species to FE calculation & randomization
+
+```{r}
+# Source Villeger (2017) functions
+source("FD_functions/species_to_FE.R")
+# Source function for randomizing assemblages (for null models)
+source("FD_functions/rand_vect_geom.R")
+
+```
+
+
+#### --------------------------------------------------------------
+## Step 2: Null models on trait distribution among species ##
+#### --------------------------------------------------------------
+
+```{r}
+# ------------------   Prepare assemblages   -----------------------
+
+# Create a list with 4 dataframes with traits (one for each class)
+list_data_ft <- list(Amphibia = data_ft_amph, Aves = data_ft_birds,
+                     Mammalia = data_ft_mam, Reptilia = data_ft_rept)
+
+# Create a list with 4 assemblages (one for each class)
+list_assembl <- lapply(list_data_ft, function(x){
+  data_nw <- df_insul %>% 
+    filter(binomial %in% x$binomial) %>%
+    distinct(binomial, group)
+  tb <- as.data.frame(table(data_nw$group, as.character(data_nw$binomial)))
+  mat_assemb <- spread(tb, Var2, Freq)
+  rownames(mat_assemb) <- mat_assemb$Var1
+  mat_assemb$Var1 <- NULL
+  mat_assemb <- as.matrix(mat_assemb)
+  return(mat_assemb)})
+
+# Remove species names to keep only traits in data_ft
+list_data_ft <- lapply(list_data_ft, function(x){
+  row.names(x) <- x$binomial
+  x <- x %>% select(-binomial)})
+
+# --------------------  Group species to FEs  ----------------------
+
+# Grouping species into FEs
+list_sp_to_FE <- lapply(list_data_ft, species_to_FE)
+
+# trait values of the FE
+list_FE_traits <- lapply(list_sp_to_FE, function(x){x$FE_traits})
+
+# Matrix of FE in assemblages
+list_assembl_FE <- mapply(x=list_assembl, y=list_sp_to_FE, function(x,y){
+  # Empty matrix
+  assembl_FE<-matrix(0, nrow(x), nrow(y$FE_sp_01), 
+                     dimnames=list(row.names(x), row.names(y$FE_sp_01))) 
+  # loop on FEs
+  for (k in row.names(y$FE_sp_01)){
+    sp_k<-names(which(y$FE_sp_01[k,]==1))   
+    if( length(sp_k)==1 ) {assembl_FE[,k]<-x[,sp_k] } # if only one species in FE k
+    if (length(sp_k)>1 ) {assembl_FE[,k]<-apply(x[,sp_k],1,sum)  } # if more than 1 species in FE k
+  }# end of k
+  return(assembl_FE)
+})
+
+
+# -----------------  Simulate n possible assemblages  -------------------
+
+# number of iterations
+n = 99 # takes 20 min for n=9999
+
+Sys.time()
+list_simulated_FE <- lapply(list_assembl_FE, function(x){
+  
+  # initialisation with the first simulated assemblage
+  random_mat_0 <- as.data.frame(x)
+  colnames(random_mat_0) <- sample(colnames(random_mat_0))
+  random_mat_0 <- as.matrix (random_mat_0)
+  N_sp <- rowSums(random_mat_0)
+  N_FE <- rowSums(random_mat_0!=0)
+  
+  for (k in 1:nrow(random_mat_0)){
+    random_mat_0[k,][which(random_mat_0[k,]!=0)] <- rand_vect_geom(N_FE[k], N_sp[k])
+  }
+  random_mat_0 <- random_mat_0[,order(colnames(random_mat_0))]
+  
+  # randomization & row bind of initial assemblage + n-1 simulated assemblages
+  for (i in 1:(n-1)){
+    random_mat <- as.data.frame(x)
+    colnames(random_mat) <- sample(colnames(random_mat))
+    random_mat <- as.matrix (random_mat)
+    N_sp <- rowSums(random_mat)
+    N_FE <- rowSums(random_mat!=0)
+    
+    for (k in 1:nrow(random_mat)){
+      random_mat[k,][which(random_mat[k,]!=0)] <- rand_vect_geom(N_FE[k], N_sp[k])
+    }
+    random_mat <- random_mat[,order(colnames(random_mat))]
+    
+    random_mat_0 <- rbind(random_mat_0, random_mat)
+  }
+  
+  return(random_mat_0)}) 
+Sys.time()
+
+list_simulated_FE <- lapply(list_simulated_FE, as.data.frame)
+
+# -----------------  Count observed modalities -------------------
+
+# Create a list with 4 df traits (one for each class)
+list_data_ft <- list(Amphibia = data_ft_amph, Aves = data_ft_birds,
+                     Mammalia = data_ft_mam, Reptilia = data_ft_rept)
+
+
+observed_modalities <- lapply(list_data_ft, function(x){
+  
+  # add a column for threat_status group (0_0, 0_1, 1_0, 1_1)
+  df <- left_join(x, df_insul %>% select(binomial, group),
+                  by="binomial")
+  
+  # initialise table for the first trait (first col after binomial)
+  to_bind <- as.data.frame(table(df$group, df[,2])) %>%
+    mutate(Trait = names(df)[2])
+  # table on each trait (all columns except binomial & threatened_ias)
+  for (i in 3:(length(names(df))-1)) {
+    to_bind2 <- as.data.frame(table(df$group, df[,i])) %>%
+      mutate(Trait = names(df)[i])
+    to_bind <- bind_rows(to_bind, to_bind2)
+  }
+  
+  # wanted columns: Group, Trait, Modality, Obs_value
+  obs_val <- to_bind %>%
+    dplyr::rename(Group = Var1,
+           Modality = Var2,
+           Obs_value = Freq)
+  return(obs_val)
+  })
+
+
+# -----------------  Save outputs -------------------
+
+# simulated FE
+saveRDS(list_simulated_FE, paste0('Trait_FE_tetra_sim_', n))
+# species x FE correspondances 
+saveRDS(list_sp_to_FE, 'sp_to_FE_tetra')
+# observed trait modalities
+saveRDS(observed_modalities, 'Trait_tetra_obs')
+
+```
+
+
+#### --------------------------------------------------------------
+## Step 3: Compare observed and simulated trait values ##
+#### --------------------------------------------------------------
+
+
+```{r}
+
+# Clean workspace
+rm(list=ls())
+
+# Load outputs from Step 2
+n=99
+sim_trait_FE <- readRDS(paste0('Trait_FE_tetra_sim_', n))
+sp_to_FE <- readRDS("sp_to_FE_tetra")
+obs_trait <- readRDS("Trait_tetra_obs")
+
+# --------------- Shape FE_traits & sim_trait_FE ------------------
+
+# order rownames
+FE_traits <- lapply(sp_to_FE, function(x){
+  x$FE_traits[order(rownames(x$FE_traits)),]}) 
+
+# transpose matrix
+t_rand_trait <- lapply(sim_trait_FE, function(x){t(x)})
+
+# --------------- Calculate simulated means & sd ------------------
+
+# Compute null models for each assemblage type separately
+
+# For IAS-NT species (Group "IAS_NT")
+IAS0_traits <- mapply(x = FE_traits, y = t_rand_trait, function(x,y){
+  cbind(x %>%
+          # pass ordered factors to simple factors
+          mutate(Habitat = factor(Habitat, ordered = F),
+                 Body.mass = factor(Body.mass, ordered = F)),
+        as.data.frame(y) %>% 
+          select(contains('IAS_NT'))) # select IAS-NT assemblages only 
+})
+ag_IAS0 <- lapply(IAS0_traits, function(x){
+  IAS0_traits_g <- x %>% 
+    pivot_longer(c(Habitat:For.niche), names_to = "Trait", values_to = "Modality")
+  ag_IAS0 <- aggregate(.~Trait+Modality, data = IAS0_traits_g, FUN=sum)
+  return(ag_IAS0)
+})
+null_mod_IAS0 <- lapply(ag_IAS0, function(x){
+  null_mod_IAS0 <- cbind(x[,1:2])
+  null_mod_IAS0$meanNM <- apply(x[,c(3:(n+2))], 1, mean)
+  null_mod_IAS0$sdNM <- apply(x[,c(3:(n+2))], 1, sd)
+  null_mod_IAS0$status <- c('IAS_NT')
+  return(null_mod_IAS0)
+})
+
+# For IAS-T species (Group "IAS_T")
+
+IAS1_traits <- mapply(x = FE_traits, y = t_rand_trait, function(x,y){
+  cbind(x %>%
+          # pass ordered factors to simple factors
+          mutate(Habitat = factor(Habitat, ordered = F),
+                 Body.mass = factor(Body.mass, ordered = F)),
+        as.data.frame(y) %>% 
+          select(contains('IAS_T'))) # select IAS-T assemblages only 
+})
+ag_IAS1 <- lapply(IAS1_traits, function(x){
+  IAS1_traits_g <- x %>% 
+    pivot_longer(c(Habitat:For.niche), names_to = "Trait", values_to = "Modality")
+  ag_IAS1 <- aggregate(.~Trait+Modality, data = IAS1_traits_g, FUN=sum)
+  return(ag_IAS1)
+})
+null_mod_IAS1 <- lapply(ag_IAS1, function(x){
+  null_mod_IAS1 <- cbind(x[,1:2])
+  null_mod_IAS1$meanNM <- apply(x[,c(3:(n+2))], 1, mean)
+  null_mod_IAS1$sdNM <- apply(x[,c(3:(n+2))], 1, sd)
+  null_mod_IAS1$status <- c('IAS_T')
+  return(null_mod_IAS1)
+})
+
+# Combine results for IAS-T & IAS-NT assemblages in one df 
+# -->  not possible to do rbind in mapply function
+# need to use for loop across all list elements
+df_nm <- FE_traits
+for (i in 1:4){
+  df_nm[[i]] <- bind_rows(null_mod_IAS0[[i]], null_mod_IAS1[[i]]) %>%
+    mutate(key = paste(Trait, Modality, status, sep='_'))
+}
+
+ag_all <- ag_IAS0
+for (i in 1:4){
+  ag_IAS0[[i]]$status <- c('IAS_NT')
+  ag_IAS1[[i]]$status <- c('IAS_T')
+  colnames(ag_IAS0[[i]]) <- colnames(ag_IAS1[[i]])
+  ag_all[[i]] <- bind_rows(ag_IAS0[[i]], ag_IAS1[[i]]) %>%
+    mutate(key = paste(Trait, Modality, status, sep='_'))
+}
+
+# ----------------  Observed vs. simulated values  -------------------
+
+# Shape observed values
+obs_values <- lapply(obs_trait, function(x){
+  x %>%
+    mutate(key = paste(Trait, Modality, Group, sep='_')) %>%
+    select(key, Obs_value)
+})
+
+df_SES <- df_nm
+df_p_values <- df_nm
+traits_nm_final <- df_nm
+
+for (i in 1:4){
+  
+  # Calculate SES
+  
+  df_SES[[i]] <- inner_join(obs_values[[i]], df_nm[[i]] %>%
+                              select(key, meanNM, sdNM), by='key')
+  df_SES[[i]]$SES <- (df_SES[[i]]$Obs_value-df_SES[[i]]$meanNM)/df_SES[[i]]$sdNM
+
+  # Calculate p.values
+  
+  df_p_values[[i]] <- inner_join(obs_values[[i]], ag_all[[i]], by='key') %>% 
+    select(-Trait, -Modality, -status)
+  
+  df_p_values[[i]]$nb_values_above_obs <- 0
+  for (k in 1:nrow(df_p_values[[i]])){
+    df_p_values[[i]]$nb_values_above_obs[k] <- rowSums(
+      df_p_values[[i]][k,-c(1,2,(n+3))]>=df_p_values[[i]]$Obs_value[k])
+  }
+  
+  # join all df to have one clean output
+  
+  traits_nm_final[[i]] <- inner_join(df_SES[[i]], df_p_values[[i]] %>% 
+                                       select(key, nb_values_above_obs), 
+                                     by='key') %>%
+    mutate(p.value = nb_values_above_obs/(n+1)) %>%
+    select(-nb_values_above_obs)
+}
+
+
+# ----------------  Save final output -------------------
+
+saveRDS(traits_nm_final, "Trait_tetra_nm_ses_pval")
+
+
+```
+
+
+#### --------------------------------------------------------------
+## Step 4: Plot outputs ##
+#### --------------------------------------------------------------
+
+
+
+
+
+
