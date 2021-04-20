@@ -1,7 +1,7 @@
 # FD_IAS_threatened_tetrapods
-Data and analysis example for profiling insular tetrapods threatened by biological invasions
+Data and analyses example for profiling insular tetrapods threatened by biological invasions
 
 
-This repository contains the code and data required to replicate the analyses in [PAPER TITLE]
+This repository contains the code and data required to replicate the analyses in [PAPER TITLE]. Trait data were previously compiled from multiple sources and missing values were imputed using phylogeny. Here is the clean database obtained after all steps of Data implementation (see Fig S2 or Data_cleaning_process.pdf).
 
-All analyses are documented in FD_insular_tetrapods.Rmd
+Analyses concerning functional diversity are documented in FD_insular_tetrapods.Rmd and trait profiling analyses are compiled in Prof_insular_tetrapods.Rmd
