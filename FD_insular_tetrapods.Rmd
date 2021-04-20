@@ -1,0 +1,469 @@
+---
+title: "Functional diversity of insular tetrapods vulnerable to biological invasions"
+author: "Clara Marino"
+date: "20/04/2021"
+output: html_document
+---
+
+#### --------------------------------------------------------------
+## Step 0: setup ##
+#### --------------------------------------------------------------
+
+Clean workspace & set up required packages
+
+```{r}
+# clean workspace
+rm(list=ls())
+
+# packages
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, tibble, tidyr, miceadds, rlist,
+               ape, clue, cluster, geometry, gtools, 
+               ggplot2, ggthemes)
+# dplyr, tidyr, tibble, miceadds, rlist: used for data manipulation 
+# miceadds: source multiple files # calls: source.all
+# ape, clue, cluster, geometry, gtools: for FD metrics computation
+# ggplot2, ggthemes: data visualization 
+
+```
+
+#### --------------------------------------------------------------
+## Step 1: load data & functions ##
+#### --------------------------------------------------------------
+
+Load data
+
+```{r}
+# load trait data for each taxa
+data_ft_amph <- readRDS("Data/1_data_ft_amph")
+data_ft_birds <- readRDS("Data/2_data_ft_birds")
+data_ft_mam <- readRDS("Data/3_data_ft_mam")
+data_ft_rept <- readRDS("Data/4_data_ft_rept")
+
+# load species groups (IAS/Other-threat, Threatened/Non-threatened)
+df_insul <- readRDS("Data/5_df_insular_assembl")
+
+```
+
+Source functions for functional diversity metrics calculation
+
+```{r}
+# Source Villeger (2017) functions
+miceadds::source.all("FD_functions/", grepstring="\\.R")
+```
+
+#### --------------------------------------------------------------
+## Step 2: Group species to functional entities  ##
+#### --------------------------------------------------------------
+
+```{r}
+
+# ------------------ Combine all df in lists --------------------
+
+# Create a list with 4 df traits (one for each class)
+list_data_ft <- list(Amphibia = data_ft_amph,  Aves = data_ft_birds,
+  Mammalia = data_ft_mam, Reptilia = data_ft_rept)
+
+# Create a list with 4 assemblages (one for each class)
+list_assembl <- lapply(list_data_ft, function(x){
+  data_nw <- df_insul %>% 
+    filter(binomial %in% x$binomial) %>%
+    distinct(binomial, group)
+  tb <- as.data.frame(table(data_nw$group, as.character(data_nw$binomial)))
+  mat_assemb <- spread(tb, Var2, Freq)
+  rownames(mat_assemb) <- mat_assemb$Var1
+  mat_assemb$Var1 <- NULL
+  mat_assemb <- as.matrix(mat_assemb)
+  return(mat_assemb)})
+
+# Remove sp names to keep only traits in data_ft
+list_data_ft <- lapply(list_data_ft, function(x){
+  row.names(x) <- x$binomial
+  x <- x %>% select(-binomial)})
+
+# Check if list elements are okay
+head(list_data_ft$Amphibia)
+
+# checking that species names are the same in the two matrices
+for (i in 1:length(list_assembl)){
+  print(sum(row.names(list_data_ft[[i]]) %in% 
+        colnames(list_assembl[[i]])) == ncol(list_assembl[[i]]))
+}
+
+# --------------------  Group species to FEs  ----------------------
+
+# Grouping species into FEs
+list_sp_to_FE <- lapply(list_data_ft, species_to_FE)
+
+# Calculate some general metrics about FEs
+a <- lapply(list_sp_to_FE, function(x){ apply(x$FE_sp_01,1,sum)})
+# Number of FE
+lapply(a,length)
+# Max number of sp in FE
+lapply(a,max)
+# Mean number of sp per FE
+lapply(a,mean)
+
+# trait values of each FE
+list_FE_traits <- lapply(list_sp_to_FE, function(x){x$FE_traits})
+
+# Matrix of FE in assemblages
+list_assembl_FE <- mapply(x=list_assembl, y=list_sp_to_FE, function(x,y){
+  # Empty matrix
+  assembl_FE<-matrix(0, nrow(x), nrow(y$FE_sp_01), 
+                           dimnames=list(row.names(x), row.names(y$FE_sp_01))) 
+  # loop on FEs
+  for (k in row.names(y$FE_sp_01)){
+    sp_k<-names(which(y$FE_sp_01[k,]==1))   
+    if( length(sp_k)==1 ) {assembl_FE[,k]<-x[,sp_k] } # if only one species in FE k
+    if (length(sp_k)>1 ) {assembl_FE[,k]<-apply(x[,sp_k],1,sum)  } # if more than 1 species in FE k
+  }# end of k
+  # sort column names for associating with coordinates (next step)
+  assembl_FE <- assembl_FE[,order(colnames(assembl_FE))]
+  return(assembl_FE)
+})
+
+# Test if list element 1 is ok
+# list_assembl_FE[[1]]
+
+# check total nb of species kept constant
+for (i in 1:length(list_assembl)){
+  print(sum(list_assembl[[i]])==sum(list_assembl_FE[[i]]))
+}
+
+```
+
+#### --------------------------------------------------------------
+## Step 3: Functional space & FD metrics ##
+#### --------------------------------------------------------------
+
+```{r}
+# ---------------  Compute functional space quality  ------------------
+
+list_qual_fs_FE = vector(mode = "list",length = length(list_FE_traits))
+for(i in 1:length(list_FE_traits)){
+  class = names(list_FE_traits)[i]
+  list_qual_fs_FE[[i]] <- quality_funct_space(
+    list_FE_traits[[i]], traits_weights=NULL, nbdim=10, metric="Gower", 
+    dendro=F, plot = NA)} # if plot : plot = paste("qual_fs_FE_", class, sep="")
+
+# Select FE coordinates in the best space
+# Best functional space = minimal meanSD
+lapply(list_qual_fs_FE,function(x){x$meanSD})
+
+# Select only coordinates from 1 to minimal meanSD 
+# order rownames for null models (step 4)
+list_coord_FE_best <- lapply(list_qual_fs_FE , function(x){
+  coord_FE <- x$details_funct_space$mat_coord[,1:which.min(x$meanSD)]
+  coord_FE <- coord_FE[order(rownames(coord_FE)),]
+  return(coord_FE)})
+names(list_coord_FE_best) <- names(list_data_ft)
+
+# ---------------  Compute metrics  ------------------
+
+# Compute FD indices according to FE weights in all groups
+list_FD_metrics <- mapply(x = list_coord_FE_best, y = list_assembl_FE, 
+                          function(x,y){
+  # Metrics from Villéger et al 2008
+  FD_metrics <- multidimFD(x, y, check_species_pool=FALSE, verb=TRUE)
+  FD_metrics <- as.data.frame(FD_metrics)
+  # Calculate FR index
+  FD_metrics$FR <- FD_metrics$Tot_weight/FD_metrics$Nb_sp
+  # calculate FOR index as in Mouillot et al 2014
+  FD_metrics$sum_max <- 0
+  for (k in 1:dim(y)[1]){
+    for (j in 1:dim(y)[2]){
+      FD_metrics$sum_max[k] <-
+        FD_metrics$sum_max[k]+(max(FD_metrics$FR[k],y[k,j])-FD_metrics$FR[k])
+  }}
+  FD_metrics$FOR <- FD_metrics$sum_max/FD_metrics$Tot_weight 
+  return(FD_metrics)
+})
+
+# -------------------  Save observed metrics  --------------------
+
+# put correct taxa names to each list element
+names(list_FD_metrics) <- names(list_data_ft)
+# save file
+saveRDS(list_FD_metrics, "FD_metrics_obs_thr_IAS_tetrap")
+# This list will be used in step 5
+
+```
+
+#### --------------------------------------------------------------
+## Step 4: Run null models ##
+#### --------------------------------------------------------------
+
+```{r}
+
+# ------------  Function for generating random assemblages  --------------
+
+rand_vect_geom <- function(N, M) {
+  vec <- rgeom(N, N/M)
+  vec <- vec + 1
+  if(sum(vec)<M){
+    while(sum(vec)!=M){
+      i=sample(1:N, 1)
+      vec[i] <- vec[i]+1
+    }
+  } else {
+    while(sum(vec)!=M){
+      i=sample(1:N, 1)
+      vec[i] <- vec[i]-1
+    }
+  }
+  while (any(vec <= 0)) {
+    negs <- vec <= 0
+    pos  <- vec > 1
+    vec[negs][i] <- vec[negs][i <- sample(sum(negs), 1)] + 1
+    vec[pos][i]  <- vec[pos ][i <- sample(sum(pos ), 1)] - 1
+  }
+  return(vec)
+}
+
+# ---------------  Randomize assemblage matrix ------------------
+
+# Number of iterations
+n=9
+
+# Initialization of result matrix list
+list_simulated_val <- vector(mode = "list",length = n)
+
+# the following loop takes time (~ 25 sec/iteration)
+# do not parallelize because a vert.txt file is generated for each iteration
+# (or do it in separated repositories)
+debut = Sys.time()
+print(debut)
+for (i in 1:n){
+  
+  # Generate random assemblage matrix
+  
+  list_random_mat <- lapply(list_assembl_FE, function(x){
+    random_mat <- as.data.frame(x)
+    colnames(random_mat) <- sample(colnames(random_mat))
+    random_mat <- as.matrix(random_mat)
+    # calculate parameters for rand_vect_geom function
+    N_sp <- rowSums(random_mat)
+    N_FE <- rowSums(random_mat!=0)
+    # randomize distribution of FE and species
+    for (k in 1:nrow(random_mat)){
+      random_mat[k,][which(random_mat[k,]!=0)] <- rand_vect_geom(N_FE[k], N_sp[k])
+    }
+    # keep order identical as in list_coord_FE_best
+    random_mat <- random_mat[,order(colnames(random_mat))]
+    return(random_mat)
+  })
+  
+  # Calculate FD metrics on the randomly generated matrix
+  
+  list_FD_random <- mapply(x = list_coord_FE_best, y = list_random_mat, function(x,y){
+    FD_metrics <- multidimFD(x, y, check_species_pool=FALSE, verb=F)
+    FD_metrics <- as.data.frame(FD_metrics)
+    # Calculate FR index
+    FD_metrics$FR <- FD_metrics$Tot_weight/FD_metrics$Nb_sp
+    # calculate FOR index as in Mouillot 2014
+    FD_metrics$sum_max <- 0
+    for (k in 1:dim(y)[1]){
+      for (j in 1:dim(y)[2]){
+        FD_metrics$sum_max[k] <-
+          FD_metrics$sum_max[k]+(max(FD_metrics$FR[k],y[k,j])-FD_metrics$FR[k])
+      }}
+    FD_metrics$FOR <- FD_metrics$sum_max/FD_metrics$Tot_weight 
+    return(FD_metrics)
+  })
+  
+  # Save obtained list in a list of lists
+  
+  list_simulated_val[[i]] <- lapply(list_FD_random, function(x){
+    x %>% select(-contains("PC")) %>%
+      mutate(Assemblage=row.names(x))})
+  
+  print(i) # for iteration following
+  
+  saveRDS(list_simulated_val, paste("FD_metrics_sim", n, sep = "_"))
+
+}
+fin = Sys.time()
+# computation time per iteration
+(fin-debut)/n # 0.428 mins (for n=9)
+
+```
+
+
+#### --------------------------------------------------------------
+## Step 5: Compare observed and simulated values ##
+#### --------------------------------------------------------------
+
+```{r}
+# clean workspace
+rm(list=ls())
+
+# enter the number of iterations of null models 
+n = 9
+
+# ---------------  Load observed and simulated values ------------------
+
+# Load observed matrix
+list_obs_FD_metrics <- readRDS("FD_metrics_obs_thr_IAS_tetrap")
+# Remove all useless columns (PC axis), create a column 'assemblage'
+observed_val <- lapply(list_obs_FD_metrics, function(x){
+  x <- x %>% select(-contains("PC"))
+  names(x) = paste(names(x), "obs", sep="_")
+  x <- x %>% mutate(Assemblage=row.names(x))
+  return(x)  })
+
+# Load simulated values
+list_simulated_val <- readRDS(paste("FD_metrics_sim", n, sep="_"))
+names(list_simulated_val) <- 1:n
+list_simulated_val <- unlist(list_simulated_val, recursive = F) # remove list nesting
+
+# ----------- Calculate means and sd of simulated values ------------------
+
+# Calculate means and sd of simulated values
+# Group simulated values by class in 4 df
+simulated_val <- observed_val
+for (i in 1:length(observed_val)){
+  class = names(observed_val)[i]
+  simulated_val[[i]] <- rlist::list.rbind(list.subset(
+    list_simulated_val, grep(class, names(list_simulated_val))))
+}
+simulated_val <- lapply(simulated_val, function(x){
+  names(x) = paste(names(x), "sim", sep="_")
+  x <- dplyr::rename(x, Assemblage=Assemblage_sim)
+  return(x) })
+
+# Calculate means and sd
+simulated_val_mean <- lapply(simulated_val, function(x){
+  x %>% group_by(Assemblage) %>%
+    summarise_if(is.numeric, mean)
+})
+simulated_val_sd <- lapply(simulated_val, function(x){
+  x %>% group_by(Assemblage) %>%
+    summarise_if(is.numeric, sd)
+})
+
+# ----------- Calculate SES and p.values  ------------------
+
+# initialize outputs
+SES <- observed_val
+p.values <- observed_val
+
+# for all groups
+for (i in 1:length(observed_val)){
+  
+  # Calculate SES for all metrics
+  
+  SES[[i]] <- (observed_val[[i]] %>% select(-Assemblage)-
+    simulated_val_mean[[i]] %>% select(-Assemblage))/
+    simulated_val_sd[[i]] %>% select(-Assemblage) 
+  
+  # Calculate p.values 
+  
+  # merge observed and simulated values
+  p.values[[i]] <- left_join(simulated_val[[i]], observed_val[[i]], by="Assemblage")
+  
+  # Count simulated values above observed values, divide by n+1 simulations
+  # Grouping by assemblages
+  p.values[[i]] <- p.values[[i]] %>% 
+    group_by(Assemblage) %>%
+    dplyr::summarise(FRic_p.value = sum(FRic_sim>=FRic_obs)/(n+1),
+           FDiv_p.value = sum(FDiv_sim>=FDiv_obs)/(n+1),
+           FEve_p.value = sum(FEve_sim>=FEve_obs)/(n+1),
+           FOR_p.value = sum(FOR_sim>=FOR_obs)/(n+1))
+}
+
+
+# --------------------  Save results  ----------------------
+
+assemb <- p.values$Amphibia$Assemblage
+
+# Shape final table (Obs values, mean, sd, SES, p.value)
+
+observed_val <- lapply(observed_val, function(x){
+  round(x %>% select(Nb_sp_obs, Tot_weight_obs, FRic_obs, 
+               FDiv_obs, FEve_obs, FOR_obs, FR_obs),4) %>%
+    dplyr::rename(Nb_FE = Nb_sp_obs, Nb_sp = Tot_weight_obs) %>%
+    mutate(Assemblage = assemb)})
+
+simulated_val_mean <- lapply(simulated_val_mean, function(x){
+  round(x %>% select(FRic_sim, FDiv_sim, FEve_sim, 
+                     FOR_sim),4) %>%
+    rename_all( ~ gsub("_sim", "_mean", ., fixed = TRUE)) %>%
+    mutate(Assemblage = assemb)})
+
+simulated_val_sd<- lapply(simulated_val_sd, function(x){
+  round(x %>% select(FRic_sim, FDiv_sim, FEve_sim, 
+                     FOR_sim),4) %>%
+    rename_all( ~ gsub("_sim", "_sd", ., fixed = TRUE)) %>%
+    mutate(Assemblage = assemb)})
+
+SES <- lapply(SES, function(x){
+  round(x %>% rename_all( ~ gsub("_obs", "_SES", ., fixed = TRUE)) %>%
+          select(FRic_SES, FDiv_SES, FEve_SES, FOR_SES),4) %>%
+    mutate(Assemblage = assemb)})
+
+# Create a list of matrix combining all tables
+
+results_table <- observed_val
+for (i in 1: length(results_table)){
+  results_table[[i]] <- bind_cols(
+    observed_val[[i]], simulated_val_mean[[i]],
+    simulated_val_sd[[i]], SES[[i]], p.values[[i]]) %>%
+    select(-contains("Assemblage...")) %>%
+    mutate(Assemblage = assemb) %>%
+    pivot_longer(cols= FRic_obs:FOR_p.value,
+                 names_to = c("Metric", ".value"),
+                 names_pattern = "(.+)_(.+)")
+}
+results_table
+
+# Save it for plotting (step 6)
+saveRDS(results_table, paste0("Table_FD_SES_pvalues_", n))
+
+```
+
+
+#### --------------------------------------------------------------
+## Step 6: Plot output ##
+#### --------------------------------------------------------------
+
+```{r}
+
+results_nm <- readRDS(paste0("Table_FD_SES_pvalues_", n))
+
+# Select only assemblages IAS-NT (0_1) & IAS-T (1_1) 
+results_nm_list <- lapply(results_nm, function(x){
+  x %>% filter(Assemblage=="IAS_NT" | Assemblage=="IAS_T") %>%
+    filter( Metric %in% c('FRic','FEve','FOR')) %>%
+    mutate(Metric = factor(Metric, levels=c('FRic','FEve','FOR'), 
+                           ordered = TRUE ))
+})
+
+
+# Create one unique df with all classes
+results_nm_fig <- results_nm_list[[1]] %>% 
+  mutate(Class = names(results_nm_list)[1])
+for(i in 2:4){
+  results_nm_fig <- bind_rows(results_nm_fig, results_nm_list[[i]]%>% 
+                                mutate(Class = names(results_nm_list)[i]))
+}
+
+# set position for bars
+pd <- position_dodge(0.6) # move them .25 to the left and right
+
+all <- ggplot(results_nm_fig, aes(x=Assemblage, y=mean, colour=Class)) + 
+  geom_bar(aes(x=Assemblage, y=obs, fill=Class, colour=Class),
+           stat = 'identity', width = .7, position = position_dodge())+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), 
+                width=.2, position = pd) +
+  geom_point( position = pd, size=2)+
+  ylim(0,1) +
+  scale_colour_manual(values=c('grey5','grey25', 'grey55', 'grey75'))+
+  scale_fill_manual(values=c('grey80','grey55', 'grey25', 'grey5'))+
+  theme_classic(base_size = 15) +
+  ylab('Metric index') + xlab(NULL)
+all+facet_wrap(~Metric)
+
+
+```
+
