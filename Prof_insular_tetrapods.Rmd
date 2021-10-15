@@ -196,14 +196,18 @@ saveRDS(observed_modalities, 'Trait_tetra_obs')
 ## Step 3: Compare observed and simulated trait values ##
 #### --------------------------------------------------------------
 
+Compute ES and p-values for IAS-T and IAS-NT assemblages
 
 ```{r}
 
 # Clean workspace
 rm(list=ls())
 
+# source function for p calculation
+source("FD_functions/calc_p_val.R")
+
 # Load outputs from Step 2
-n=99
+n=99 # p-calc works only for large n (n>500)
 sim_trait_FE <- readRDS(paste0('Trait_FE_tetra_sim_', n))
 sp_to_FE <- readRDS("sp_to_FE_tetra")
 obs_trait <- readRDS("Trait_tetra_obs")
@@ -264,9 +268,10 @@ null_mod_IAS1 <- lapply(ag_IAS1, function(x){
   null_mod_IAS1 <- cbind(x[,1:2])
   null_mod_IAS1$meanNM <- apply(x[,c(3:(n+2))], 1, mean)
   null_mod_IAS1$sdNM <- apply(x[,c(3:(n+2))], 1, sd)
-  null_mod_IAS1$status <- c('IAS_T')
+  null_mod_IAS1$status <- c('IAS_T') 
   return(null_mod_IAS1)
 })
+
 
 # Combine results for IAS-T & IAS-NT assemblages in one df 
 # -->  not possible to do rbind in mapply function
@@ -295,53 +300,329 @@ obs_values <- lapply(obs_trait, function(x){
     select(key, Obs_value)
 })
 
-df_SES <- df_nm
 df_p_values <- df_nm
 traits_nm_final <- df_nm
 
 for (i in 1:4){
   
-  # Calculate SES
-  
-  df_SES[[i]] <- inner_join(obs_values[[i]], df_nm[[i]] %>%
-                              select(key, meanNM, sdNM), by='key')
-  df_SES[[i]]$SES <- (df_SES[[i]]$Obs_value-df_SES[[i]]$meanNM)/df_SES[[i]]$sdNM
-
   # Calculate p.values
   
   df_p_values[[i]] <- inner_join(obs_values[[i]], ag_all[[i]], by='key') %>% 
     select(-Trait, -Modality, -status)
   
-  df_p_values[[i]]$nb_values_above_obs <- 0
-  for (k in 1:nrow(df_p_values[[i]])){
-    df_p_values[[i]]$nb_values_above_obs[k] <- rowSums(
-      df_p_values[[i]][k,-c(1,2,(n+3))]>=df_p_values[[i]]$Obs_value[k])
+  df_p_values[[i]]$p.val <- 0
+  df_p_values[[i]]$b <- 0
+  
+  for (r in 1:nrow(df_p_values[[i]])){
+    
+    sim <- as.numeric(df_p_values[[i]][r,] %>%
+                        select(-c("key","Obs_value","p.val","b")))
+    obs <- as.numeric(df_p_values[[i]]$Obs_value[r])
+    
+    b = sum(obs<sim)+sum(obs==sim)
+    N = length(sim)
+    
+    if (b<6||b>(n-5)) {
+      fit <- density(sim)
+      all_p <- vector()
+      for(w in 1:1000){
+        x.new <- rnorm(N, sim, fit$bw)
+        all_p[w] <- calc_pval_trait(x.new, obs)
+      }
+      p = median(all_p)
+    } else {
+      p = (b+1)/(N+1)
+    }
+    
+    # store p-val and b to check
+    df_p_values[[i]]$p.val[r] <- p
+    df_p_values[[i]]$b[r] <- b
   }
   
   # join all df to have one clean output
-  
-  traits_nm_final[[i]] <- inner_join(df_SES[[i]], df_p_values[[i]] %>% 
-                                       select(key, nb_values_above_obs), 
-                                     by='key') %>%
-    mutate(p.value = nb_values_above_obs/(n+1)) %>%
-    select(-nb_values_above_obs)
+  # calculate ES
+  traits_nm_final[[i]] <- df_p_values[[i]] %>%
+    select(key, Obs_value, b, p.val) %>%
+    mutate(ES = qnorm(1-p.val)) 
 }
-
 
 # ----------------  Save final output -------------------
 
-saveRDS(traits_nm_final, "Trait_tetra_nm_ses_pval")
-
+saveRDS(traits_nm_final, "Trait_tetra_nm_es_pval")
 
 ```
 
+
+Compute ES and p-val for Other-threat-T assemblage
+
+```{r}
+# Clean workspace
+rm(list=ls())
+
+# source function for p calculation
+source("FD_functions/calc_p_val.R")
+
+# Load outputs from Step 2
+n=99 # p-calc works only for large n (n>500)
+sim_trait_FE <- readRDS(paste0('Trait_FE_tetra_sim_', n))
+sp_to_FE <- readRDS("sp_to_FE_tetra")
+obs_trait <- readRDS("Trait_tetra_obs")
+
+# --------------- Shape FE_traits & sim_trait_FE ------------------
+
+# order rownames
+FE_traits <- lapply(sp_to_FE, function(x){
+  x$FE_traits[order(rownames(x$FE_traits)),]}) 
+
+# transpose matrix
+t_rand_trait <- lapply(sim_trait_FE, function(x){t(x)})
+
+# --------------- Calculate simulated means & sd ------------------
+
+# Compute null models for each assemblage type separately
+
+# For other threats NT species (Group "other_NT")
+other0_traits <- mapply(x = FE_traits, y = t_rand_trait, function(x,y){
+  cbind(x %>%
+          # pass ordered factors to simple factors
+          mutate(Habitat = factor(Habitat, ordered = F),
+                 Body.mass = factor(Body.mass, ordered = F)),
+        as.data.frame(y) %>% 
+          select(contains('other_NT'))) # select other-NT assemblages only 
+})
+ag_other0 <- lapply(other0_traits, function(x){
+  other0_traits_g <- x %>% 
+    pivot_longer(c(Habitat:For.niche), names_to = "Trait", values_to = "Modality")
+  ag_other0 <- aggregate(.~Trait+Modality, data = other0_traits_g, FUN=sum)
+  return(ag_other0)
+})
+null_mod_other0 <- lapply(ag_other0, function(x){
+  null_mod_other0 <- cbind(x[,1:2])
+  null_mod_other0$meanNM <- apply(x[,c(3:(n+2))], 1, mean)
+  null_mod_other0$sdNM <- apply(x[,c(3:(n+2))], 1, sd)
+  null_mod_other0$status <- c('other_NT')
+  return(null_mod_other0)
+})
+
+# For other threats T species (Group "other_T")
+
+other1_traits <- mapply(x = FE_traits, y = t_rand_trait, function(x,y){
+  cbind(x %>%
+          # pass ordered factors to simple factors
+          mutate(Habitat = factor(Habitat, ordered = F),
+                 Body.mass = factor(Body.mass, ordered = F)),
+        as.data.frame(y) %>% 
+          select(contains('other_T'))) # select other-T assemblages only 
+})
+ag_other1 <- lapply(other1_traits, function(x){
+  other1_traits_g <- x %>% 
+    pivot_longer(c(Habitat:For.niche), names_to = "Trait", values_to = "Modality")
+  ag_other1 <- aggregate(.~Trait+Modality, data = other1_traits_g, FUN=sum)
+  return(ag_other1)
+})
+null_mod_other1 <- lapply(ag_other1, function(x){
+  null_mod_other1 <- cbind(x[,1:2])
+  null_mod_other1$meanNM <- apply(x[,c(3:(n+2))], 1, mean)
+  null_mod_other1$sdNM <- apply(x[,c(3:(n+2))], 1, sd)
+  null_mod_other1$status <- c('other_T')
+  return(null_mod_other1)
+})
+
+# Combine results for 1_0 & 0_0 assemblages in one df 
+# -->  not possible to do rbind in mapply function
+# need to use for loop across all list elements
+df_nm <- FE_traits
+for (i in 1:4){
+  df_nm[[i]] <- bind_rows(null_mod_other0[[i]], null_mod_other1[[i]]) %>%
+    mutate(key = paste(Trait, Modality, status, sep='_'))
+}
+
+ag_all <- ag_other0
+for (i in 1:4){
+  ag_other0[[i]]$status <- c('other_NT')
+  ag_other1[[i]]$status <- c('other_T')
+  colnames(ag_other0[[i]]) <- colnames(ag_other1[[i]])
+  ag_all[[i]] <- bind_rows(ag_other0[[i]], ag_other1[[i]]) %>%
+    mutate(key = paste(Trait, Modality, status, sep='_'))
+}
+
+# ----------------  Observed vs. simulated values  -------------------
+
+# Shape observed values
+obs_values <- lapply(obs_trait, function(x){
+  x %>%
+    mutate(key = paste(Trait, Modality, Group, sep='_')) %>%
+    select(key, Obs_value)
+})
+
+df_p_values <- df_nm
+traits_nm_final <- df_nm
+
+for (i in 1:4){
+  
+  # Calculate p.values
+  
+  df_p_values[[i]] <- inner_join(obs_values[[i]], ag_all[[i]], by='key') %>% 
+    select(-Trait, -Modality, -status)
+  
+  df_p_values[[i]]$p.val <- 0
+  df_p_values[[i]]$b <- 0
+  
+  for (r in 1:nrow(df_p_values[[i]])){
+    
+    sim <- as.numeric(df_p_values[[i]][r,] %>%
+                        select(-c("key","Obs_value","p.val","b")))
+    obs <- as.numeric(df_p_values[[i]]$Obs_value[r])
+    
+    b = sum(obs<sim)+sum(obs==sim)
+    N = length(sim)
+    
+    if (b<6||b>(n-5)) {
+      fit <- density(sim)
+      all_p <- vector()
+      for(w in 1:1000){
+        x.new <- rnorm(N, sim, fit$bw)
+        all_p[w] <- calc_pval_trait(x.new, obs)
+      }
+      p = median(all_p)
+    } else {
+      p = (b+1)/(N+1)
+    }
+    
+    # store p-val and b to check
+    df_p_values[[i]]$p.val[r] <- p
+    df_p_values[[i]]$b[r] <- b
+
+  }
+  
+  # join all df to have one clean output
+  # calculate ES
+  traits_nm_final[[i]] <- df_p_values[[i]] %>%
+    select(key, Obs_value, b, p.val) %>%
+    mutate(ES = qnorm(1-p.val)) 
+
+}
+# ----------------  Save final output -------------------
+
+saveRDS(traits_nm_final, "Trait_tetra_nm_es_pval_other_threat")
+
+
+```
 
 #### --------------------------------------------------------------
 ## Step 4: Plot outputs ##
 #### --------------------------------------------------------------
 
+Figure representing dominant and overrepresented modalities of IAS-T tetrapods have been realized manually using Inskape and results from "traits_nm_final" table.
+
+Figure comparing traits of IAS-T vs IAS-NT species:
+
+```{r}
+
+es <- readRDS("Trait_tetra_nm_es_pval")
+
+# ------------ Traits of IAS-T vs IAS-NT species ----------------
+
+es_clean <- lapply(es, function(x){
+  x %>% 
+    # change multi_anim to avoid"_" and separate "key" column
+    mutate(key=recode(key, 
+                      "Main.diet_Multi_anim_IAS_NT"="Main.diet_MultiAnim_IAS_NT",
+                      "Main.diet_Multi_anim_IAS_T"="Main.diet_MultiAnim_IAS_T")) %>%
+    # separate key colum to have Group, Trait & Modality var
+    separate(key, c("Trait","Modality","Group"), "_", extra = "merge") %>%
+    # create a col for plotting deviation beatween mean & observed value
+    mutate_if(is.character, as.factor)%>% 
+    select(Trait, Modality, Group, ES, p.val) %>%
+    pivot_wider(names_from = Group, values_from = c(ES, p.val))
+})
+
+# Plot all ES (signif & non signif)
+# All classes together
+
+es_all <- bind_rows(es_clean, .id = "Class")
+
+# select only signif ES
+es_signif_all <- es_all %>% 
+  filter(p.val_IAS_NT > 0.975 | p.val_IAS_T > 0.975 |
+           p.val_IAS_T < 0.025 | p.val_IAS_NT < 0.025 )
+
+ggplot(es_signif_all, aes(x=ES_IAS_T, y=ES_IAS_NT, group=Trait)) +
+  geom_point(aes(color=Trait)) + 
+  scale_color_manual(values=c("chartreuse3","steelblue2","darkorange",
+                              "darkslategrey","slateblue3","red3"))+
+  geom_text(aes(label=Modality),hjust=0, vjust=0)+
+  xlim(-4, 4) + ylim(-4,4) +
+  geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+  theme_classic()+
+  facet_wrap(~Class)
+
+```
+
+Figure comparing traits of IAS-T and Other-threat-T species:
+
+```{r}
+
+ias <- readRDS("Trait_tetra_nm_es_pval")
+
+other <- readRDS("Trait_tetra_nm_es_pval_other_threat")
+
+ias_clean <- lapply(ias, function(x){
+  x %>% 
+    # change multi_anim to avoid"_" and separate "key" column
+    mutate(key=recode(key, 
+                      "Main.diet_Multi_anim_IAS_NT"="Main.diet_MultiAnim_IAS_NT",
+                      "Main.diet_Multi_anim_IAS_T"="Main.diet_MultiAnim_IAS_T")) %>%
+    # separate key colum to have Group, Trait & Modality var
+    separate(key, c("Trait","Modality","Group"), "_", extra = "merge") %>%
+    # create a col for plotting deviation between mean & observed value
+    mutate_if(is.character, as.factor)%>% 
+    select(Trait, Modality, Group, ES, p.val)
+})
+
+other_clean <- lapply(other, function(x){
+  x %>% 
+    # change multi_anim to avoid"_" and separate "key" column
+    mutate(key=recode(key, 
+                      "Main.diet_Multi_anim_other_NT"="Main.diet_MultiAnim_other_NT",
+                      "Main.diet_Multi_anim_other_T"="Main.diet_MultiAnim_other_T")) %>%
+    # separate key colum to have Group, Trait & Modality var
+    separate(key, c("Trait","Modality","Group"), "_", extra = "merge") %>%
+    # create a col for plotting deviation beatween mean & observed value
+    mutate_if(is.character, as.factor)%>% 
+    select(Trait, Modality, Group, ES, p.val)
+})
+
+all_clean <- ias_clean
+for (i in 1:4){
+  all_clean[[i]] <- bind_rows(ias_clean[[i]], other_clean[[i]])
+}
+
+es_all <- lapply(all_clean, function(x){
+  x %>%
+    pivot_wider(names_from = Group, values_from = c(ES, p.val))
+})
+
+es_all <- bind_rows(es_all, .id = "Class")
+
+# select only signif SES
+es_signif_all <- es_all %>% 
+  filter(p.val_IAS_T > 0.975 | p.val_other_T > 0.975 |
+           p.val_IAS_T < 0.025 | p.val_other_T < 0.025 )
+
+ggplot(es_signif_all, aes(x=ES_IAS_T, y=ES_other_T, group=Trait)) +
+  geom_point(aes(color=Trait)) + 
+  scale_color_manual(values=c("chartreuse3","steelblue2","darkorange",
+                              "darkslategrey","slateblue3","red3"))+ 
+  geom_text(aes(label=Modality),hjust=0, vjust=0) +
+  xlim(-4, 4) + ylim(-4,4) +
+  geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+  stat_function(fun=function(x){x})+
+  stat_function(fun=function(x){3*x}, color="red")+
+  stat_function(fun=function(x){x/3}, color="red")+
+  theme_classic()+
+  facet_wrap(~Class)
 
 
-
-
+```
 

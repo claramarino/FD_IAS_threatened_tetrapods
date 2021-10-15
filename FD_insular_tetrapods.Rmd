@@ -271,127 +271,130 @@ fin = Sys.time()
 # clean workspace
 rm(list=ls())
 
+
 # enter the number of iterations of null models 
+# must be large enough for calculating p-values (n>500)
 n = 9
 
 # ---------------  Load observed and simulated values ------------------
 
 # Load observed matrix
 list_obs_FD_metrics <- readRDS("FD_metrics_obs_thr_IAS_tetrap")
-# Remove all useless columns (PC axis), create a column 'assemblage'
+# Remove all useless columns (PC axis), create a column assemblage
 observed_val <- lapply(list_obs_FD_metrics, function(x){
-  x <- x %>% select(-contains("PC"))
-  names(x) = paste(names(x), "obs", sep="_")
-  x <- x %>% mutate(Assemblage=row.names(x))
-  return(x)  })
+  x %>% select(-contains("PC")) %>%
+    mutate(Assemblage=row.names(x))})
 
 # Load simulated values
 list_simulated_val <- readRDS(paste("FD_metrics_sim", n, sep="_"))
 names(list_simulated_val) <- 1:n
 list_simulated_val <- unlist(list_simulated_val, recursive = F) # remove list nesting
 
-# ----------- Calculate means and sd of simulated values ------------------
-
-# Calculate means and sd of simulated values
 # Group simulated values by class in 4 df
 simulated_val <- observed_val
 for (i in 1:length(observed_val)){
   class = names(observed_val)[i]
-  simulated_val[[i]] <- rlist::list.rbind(list.subset(
+  simulated_val[[i]] <- list.rbind(list.subset(
     list_simulated_val, grep(class, names(list_simulated_val))))
 }
-simulated_val <- lapply(simulated_val, function(x){
-  names(x) = paste(names(x), "sim", sep="_")
-  x <- dplyr::rename(x, Assemblage=Assemblage_sim)
-  return(x) })
 
-# Calculate means and sd
+# Calculates means & sd
 simulated_val_mean <- lapply(simulated_val, function(x){
   x %>% group_by(Assemblage) %>%
-    summarise_if(is.numeric, mean)
+    summarise_if(is.numeric, mean) %>%
+    pivot_longer(cols = FRic:FOR,
+                     names_to = "Metric",
+                     values_to = "Mean") %>%
+    select(Assemblage, Metric, Mean)
 })
 simulated_val_sd <- lapply(simulated_val, function(x){
   x %>% group_by(Assemblage) %>%
-    summarise_if(is.numeric, sd)
+    summarise_if(is.numeric, sd) %>%
+    pivot_longer(cols = FRic:FOR,
+                     names_to = "Metric",
+                     values_to = "Sd")%>%
+    select(Assemblage, Metric, Sd)
 })
 
-# ----------- Calculate SES and p.values  ------------------
+# ----------- Calculate p-values and ES ------------------
 
-# initialize outputs
-SES <- observed_val
-p.values <- observed_val
+# initialisation
+p.values <- vector(mode = "list", length = 4)
+names(p.values) <- names(observed_val)
+metric = c("FRic", "FEve", "FOR")
+assemblage = unique(observed_val$Amphibia$Assemblage)
+p.values_temp <- data.frame(
+  Assemblage = character(1),
+  Metric = character(1),
+  p.val = numeric(1),
+  b = numeric(1))
 
-# for all groups
 for (i in 1:length(observed_val)){
+
+  p.values_all <- data.frame(
+    Assemblage = character(),
+    Metric = character(),
+    p.val = numeric(), 
+    b = numeric())
   
-  # Calculate SES for all metrics
-  
-  SES[[i]] <- (observed_val[[i]] %>% select(-Assemblage)-
-    simulated_val_mean[[i]] %>% select(-Assemblage))/
-    simulated_val_sd[[i]] %>% select(-Assemblage) 
-  
-  # Calculate p.values 
-  
-  # merge observed and simulated values
-  p.values[[i]] <- left_join(simulated_val[[i]], observed_val[[i]], by="Assemblage")
-  
-  # Count simulated values above observed values, divide by n+1 simulations
-  # Grouping by assemblages
-  p.values[[i]] <- p.values[[i]] %>% 
-    group_by(Assemblage) %>%
-    dplyr::summarise(FRic_p.value = sum(FRic_sim>=FRic_obs)/(n+1),
-           FDiv_p.value = sum(FDiv_sim>=FDiv_obs)/(n+1),
-           FEve_p.value = sum(FEve_sim>=FEve_obs)/(n+1),
-           FOR_p.value = sum(FOR_sim>=FOR_obs)/(n+1))
+  for(m in metric){
+    for(a in assemblage){
+      obs_m <- observed_val[[i]][which(observed_val[[i]]$Assemblage==a),m]
+      sim_m <- simulated_val[[i]][which(simulated_val[[i]]$Assemblage==a),m]
+      b <- sum(sim_m >obs_m) + sum(sim_m==obs_m)
+      N = length(sim_m)
+      
+      # Adjust calculation for extreme p-values
+      if (b < 6 || b > (n-5)) { 
+        fit <- density(sim_m)
+        all_p <- vector()
+        for(w in 1:1000){
+          x.new <- rnorm(N, sim_m, fit$bw)
+          all_p[w] <- calc_pval_trait(x.new, obs_m)
+        }
+        p = median(all_p)
+      } else {
+        p = (b+1)/(N+1)
+      }
+
+      p.values_temp$Assemblage = a
+      p.values_temp$Metric = m
+      p.values_temp$p.val = p
+      p.values_temp$b = b
+      
+      p.values_all <- bind_rows(p.values_all,p.values_temp)
+    }
+  }
+  p.values_all$ES <- qnorm(1-p.values_all$p.val)
+  p.values[[i]] <- p.values_all
 }
 
+observed_val_long <- lapply(observed_val, function(x){
+  x %>% pivot_longer(cols = FRic:FOR,
+                     names_to = "Metric",
+                     values_to = "Obs")
+})
 
 # --------------------  Save results  ----------------------
 
-assemb <- p.values$Amphibia$Assemblage
-
-# Shape final table (Obs values, mean, sd, SES, p.value)
-
-observed_val <- lapply(observed_val, function(x){
-  round(x %>% select(Nb_sp_obs, Tot_weight_obs, FRic_obs, 
-               FDiv_obs, FEve_obs, FOR_obs, FR_obs),4) %>%
-    dplyr::rename(Nb_FE = Nb_sp_obs, Nb_sp = Tot_weight_obs) %>%
-    mutate(Assemblage = assemb)})
-
-simulated_val_mean <- lapply(simulated_val_mean, function(x){
-  round(x %>% select(FRic_sim, FDiv_sim, FEve_sim, 
-                     FOR_sim),4) %>%
-    rename_all( ~ gsub("_sim", "_mean", ., fixed = TRUE)) %>%
-    mutate(Assemblage = assemb)})
-
-simulated_val_sd<- lapply(simulated_val_sd, function(x){
-  round(x %>% select(FRic_sim, FDiv_sim, FEve_sim, 
-                     FOR_sim),4) %>%
-    rename_all( ~ gsub("_sim", "_sd", ., fixed = TRUE)) %>%
-    mutate(Assemblage = assemb)})
-
-SES <- lapply(SES, function(x){
-  round(x %>% rename_all( ~ gsub("_obs", "_SES", ., fixed = TRUE)) %>%
-          select(FRic_SES, FDiv_SES, FEve_SES, FOR_SES),4) %>%
-    mutate(Assemblage = assemb)})
-
-# Create a list of matrix combining all tables
-
-results_table <- observed_val
-for (i in 1: length(results_table)){
-  results_table[[i]] <- bind_cols(
-    observed_val[[i]], simulated_val_mean[[i]],
-    simulated_val_sd[[i]], SES[[i]], p.values[[i]]) %>%
-    select(-contains("Assemblage...")) %>%
-    mutate(Assemblage = assemb) %>%
-    pivot_longer(cols= FRic_obs:FOR_p.value,
-                 names_to = c("Metric", ".value"),
-                 names_pattern = "(.+)_(.+)")
+final_tbl <- observed_val
+for (i in 1:4){
+  final_tbl[[i]] <- left_join(
+    left_join(p.values[[i]], observed_val_long[[i]],
+              by = c("Assemblage", "Metric")),
+    left_join(simulated_val_mean[[i]], simulated_val_sd[[i]],
+              by = c("Assemblage", "Metric")),
+    by = c("Assemblage", "Metric")) %>%
+    mutate(Class = names(final_tbl)[i])
 }
-results_table
+final_tbl_all <- as.data.frame(do.call(rbind, final_tbl))
 
-# Save it for plotting (step 6)
-saveRDS(results_table, paste0("Table_FD_SES_pvalues_", n))
+final_tbl_ias <- final_tbl_all %>%
+  select(Metric, Assemblage, Class, Nb_sp, Tot_weight, Obs, Mean, Sd, ES, p.val) %>%
+  filter(Assemblage %in% c("IAS_T", "IAS_NT"))
+
+saveRDS(final_tbl_ias, paste0("Table_FD_ES_pvalues_", n))
+
 
 ```
 
@@ -402,32 +405,15 @@ saveRDS(results_table, paste0("Table_FD_SES_pvalues_", n))
 
 ```{r}
 
-results_nm <- readRDS(paste0("Table_FD_SES_pvalues_", n))
-
-# Select only assemblages IAS-NT (0_1) & IAS-T (1_1) 
-results_nm_list <- lapply(results_nm, function(x){
-  x %>% filter(Assemblage=="IAS_NT" | Assemblage=="IAS_T") %>%
-    filter( Metric %in% c('FRic','FEve','FOR')) %>%
-    mutate(Metric = factor(Metric, levels=c('FRic','FEve','FOR'), 
-                           ordered = TRUE ))
-})
-
-
-# Create one unique df with all classes
-results_nm_fig <- results_nm_list[[1]] %>% 
-  mutate(Class = names(results_nm_list)[1])
-for(i in 2:4){
-  results_nm_fig <- bind_rows(results_nm_fig, results_nm_list[[i]]%>% 
-                                mutate(Class = names(results_nm_list)[i]))
-}
+results_nm <- readRDS(paste0("Table_FD_ES_pvalues_", n))
 
 # set position for bars
 pd <- position_dodge(0.6) # move them .25 to the left and right
 
-all <- ggplot(results_nm_fig, aes(x=Assemblage, y=mean, colour=Class)) + 
-  geom_bar(aes(x=Assemblage, y=obs, fill=Class, colour=Class),
+all <- ggplot(results_nm, aes(x=Assemblage, y=Mean, colour=Class)) + 
+  geom_bar(aes(x=Assemblage, y=Obs, fill=Class, colour=Class),
            stat = 'identity', width = .7, position = position_dodge())+
-  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), 
+  geom_errorbar(aes(ymin=Mean-Sd, ymax=Mean+Sd), 
                 width=.2, position = pd) +
   geom_point( position = pd, size=2)+
   ylim(0,1) +
@@ -437,6 +423,7 @@ all <- ggplot(results_nm_fig, aes(x=Assemblage, y=mean, colour=Class)) +
   ylab('Metric index') + xlab(NULL)
 all+facet_wrap(~Metric)
 
+# Figure was arranged using Inskape for aesthetic
 
 ```
 
